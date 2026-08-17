@@ -2,9 +2,6 @@ name: EProxy + Cloudflare Quick Tunnel
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   proxy:
@@ -20,30 +17,90 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install flask requests
 
-      - name: Start EProxy
+      - name: Locate and start EProxy
+        shell: bash
         run: |
-          nohup python eproxy.py > eproxy.log 2>&1 &
-          echo $! > eproxy.pid
+          set -e
 
-          echo "Waiting for proxy..."
+          echo "Searching for eproxy.py..."
 
-          for i in {1..30}; do
-            if curl -s http://127.0.0.1:8989/ > /dev/null 2>&1; then
-              echo "Proxy is running."
-              break
+          EPROXY=$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -iname "eproxy.py" \
+            -print -quit)
+
+          if [ -z "$EPROXY" ]; then
+            echo "❌ eproxy.py not found!"
+            echo ""
+            echo "Repository files:"
+            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f | sort
+            exit 1
+          fi
+
+          echo "✅ Found:"
+          echo "$EPROXY"
+
+          cd "$(dirname "$EPROXY")"
+
+          echo "Starting EProxy..."
+
+          nohup python "$(basename "$EPROXY")" \
+            > "$GITHUB_WORKSPACE/eproxy.log" 2>&1 &
+
+          EPROXY_PID=$!
+          echo "$EPROXY_PID" > "$GITHUB_WORKSPACE/eproxy.pid"
+
+          echo "EProxy PID: $EPROXY_PID"
+
+          sleep 3
+
+          if ! kill -0 "$EPROXY_PID" 2>/dev/null; then
+            echo "❌ EProxy stopped!"
+            echo ""
+            cat "$GITHUB_WORKSPACE/eproxy.log"
+            exit 1
+          fi
+
+          echo "✅ EProxy is running."
+
+          echo ""
+          echo "===== EProxy log ====="
+          cat "$GITHUB_WORKSPACE/eproxy.log" || true
+
+      - name: Check proxy port
+        shell: bash
+        run: |
+          echo "Checking port 8989..."
+
+          for i in {1..20}; do
+            if (echo > /dev/tcp/127.0.0.1/8989) >/dev/null 2>&1; then
+              echo "✅ Port 8989 is open."
+              exit 0
             fi
+
             sleep 1
           done
 
+          echo "❌ Port 8989 is not open."
+
+          echo ""
+          echo "===== EProxy log ====="
           cat eproxy.log || true
 
+          exit 1
+
       - name: Install Cloudflared
+        shell: bash
         run: |
+          set -e
+
+          echo "Downloading cloudflared..."
+
           curl -L \
             --fail \
             --silent \
@@ -52,73 +109,152 @@ jobs:
             -o cloudflared
 
           chmod +x cloudflared
+
           sudo mv cloudflared /usr/local/bin/cloudflared
 
+          echo "Cloudflared version:"
           cloudflared --version
 
       - name: Start Cloudflare Quick Tunnel
+        shell: bash
         run: |
+          set -e
+
+          echo "Starting Cloudflare Quick Tunnel..."
+
           nohup cloudflared tunnel \
             --url http://127.0.0.1:8989 \
             --no-autoupdate \
             > cloudflared.log 2>&1 &
 
-          echo $! > cloudflared.pid
+          CLOUDFLARED_PID=$!
 
-          echo "Waiting for Cloudflare tunnel..."
+          echo "$CLOUDFLARED_PID" > cloudflared.pid
 
-          for i in {1..30}; do
-            TUNNEL_URL=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' cloudflared.log | head -n 1 || true)
+          echo "Cloudflared PID: $CLOUDFLARED_PID"
+
+          echo "Waiting for tunnel URL..."
+
+          TUNNEL_URL=""
+
+          for i in {1..60}; do
+            TUNNEL_URL=$(grep -oE \
+              'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+              cloudflared.log \
+              | head -n 1 || true)
 
             if [ -n "$TUNNEL_URL" ]; then
               break
             fi
 
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "❌ Cloudflared stopped!"
+
+              echo ""
+              echo "===== Cloudflared log ====="
+              cat cloudflared.log
+
+              exit 1
+            fi
+
             sleep 2
           done
 
-          echo ""
-          echo "========================================"
-          echo "      CLOUDFLARE QUICK TUNNEL"
-          echo "========================================"
-          echo ""
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ Could not obtain Cloudflare tunnel URL."
 
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "Proxy URL:"
-            echo "$TUNNEL_URL"
             echo ""
-            echo "========================================"
-
-            echo "## 🚀 EProxy" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "**Cloudflare URL:**" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "\`$TUNNEL_URL\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "ERROR: Cloudflare tunnel URL was not detected."
-            echo ""
+            echo "===== Cloudflared log ====="
             cat cloudflared.log
+
+            exit 1
+          fi
+
+          echo ""
+          echo "=============================================="
+          echo "       CLOUDFLARE QUICK TUNNEL"
+          echo "=============================================="
+          echo ""
+          echo "🌐 Proxy URL:"
+          echo ""
+          echo "$TUNNEL_URL"
+          echo ""
+          echo "=============================================="
+          echo ""
+
+          echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
+
+          {
+            echo "# 🚀 EProxy"
+            echo ""
+            echo "## Cloudflare Quick Tunnel"
+            echo ""
+            echo "\`$TUNNEL_URL\`"
+            echo ""
+            echo "### Proxy endpoint"
+            echo ""
+            echo "$TUNNEL_URL/<target-url>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify processes
+        shell: bash
+        run: |
+          echo "===== Process status ====="
+
+          EPROXY_PID=$(cat eproxy.pid)
+          CLOUDFLARED_PID=$(cat cloudflared.pid)
+
+          echo "EProxy PID: $EPROXY_PID"
+          echo "Cloudflared PID: $CLOUDFLARED_PID"
+
+          if kill -0 "$EPROXY_PID" 2>/dev/null; then
+            echo "✅ EProxy running"
+          else
+            echo "❌ EProxy not running"
+            cat eproxy.log || true
+            exit 1
+          fi
+
+          if kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            echo "✅ Cloudflared running"
+          else
+            echo "❌ Cloudflared not running"
+            cat cloudflared.log || true
             exit 1
           fi
 
       - name: Keep proxy and tunnel alive
+        shell: bash
         run: |
+          echo ""
+          echo "=============================================="
+          echo "             PROXY IS LIVE"
+          echo "=============================================="
+          echo ""
+          echo "🌐 $TUNNEL_URL"
+          echo ""
           echo "EProxy PID: $(cat eproxy.pid)"
           echo "Cloudflared PID: $(cat cloudflared.pid)"
           echo ""
-          echo "Tunnel is running..."
-          echo "Press Ctrl+C locally only if testing; GitHub will keep this job running."
+          echo "GitHub Actions runner will keep this alive."
+          echo ""
 
           while true; do
-            if ! kill -0 "$(cat eproxy.pid)" 2>/dev/null; then
-              echo "EProxy stopped!"
-              cat eproxy.log
+
+            EPROXY_PID=$(cat eproxy.pid)
+            CLOUDFLARED_PID=$(cat cloudflared.pid)
+
+            if ! kill -0 "$EPROXY_PID" 2>/dev/null; then
+              echo "❌ EProxy stopped!"
+              echo ""
+              cat eproxy.log || true
               exit 1
             fi
 
-            if ! kill -0 "$(cat cloudflared.pid)" 2>/dev/null; then
-              echo "Cloudflared stopped!"
-              cat cloudflared.log
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "❌ Cloudflared stopped!"
+              echo ""
+              cat cloudflared.log || true
               exit 1
             fi
 
@@ -127,10 +263,16 @@ jobs:
 
       - name: Show logs
         if: always()
+        shell: bash
         run: |
-          echo "===== EProxy log ====="
+          echo ""
+          echo "=============================================="
+          echo "               EPROXY LOG"
+          echo "=============================================="
           cat eproxy.log || true
 
           echo ""
-          echo "===== Cloudflared log ====="
+          echo "=============================================="
+          echo "            CLOUDFLARED LOG"
+          echo "=============================================="
           cat cloudflared.log || true
