@@ -1,15 +1,38 @@
 # Streamzy (EProxy)
 
-A lightweight HTTP streaming reverse proxy built with Flask and `requests`, designed to forward video streams with range requests, custom session cookies, and referrer headers. Can be run locally or automated via GitHub Actions with Cloudflare Quick Tunnels.
+A streaming reverse proxy for eporner.com (mp4) and surrit.com/missav (HLS m3u8) with ffmpeg remux, Playwright cookie extraction, and a GitHub Actions CI/CD pipeline via Cloudflare Quick Tunnel.
 
 ---
 
 ## Features
 
-- **Chunked Media Streaming**: Streams large video and media chunks efficiently using `Response(stream_with_context(...))`.
-- **Range Request Support**: Forwards `Range` request headers to support video seeking and resuming.
-- **Custom Session Handling**: Pre-configured headers, session cookies, and referrers for bypassing restrictions.
-- **Automated Cloudflare Quick Tunnel**: GitHub Actions workflow to run the proxy on-demand and expose a secure HTTPS public tunnel endpoint.
+- **Epornor Proxy**: Stream/MP4 passthrough via cloudscraper sessions
+- **Surrit/missav HLS Proxy**: Rewrites m3u8 segment URLs through `/proxy` for hls.js playback
+- **HLS Direct**: ffmpeg remux to fragmented MP4 (TS -> MP4 via `aac_adtstoasc`)
+- **Auth**: `STREAMZY_TOKEN` env var; Bearer header / `_token` query param / session cookie
+- **SSRF Protection**: Host allowlist (`eporner.com`, `surrit.com`) + DNS IP validation
+- **Cookie Scoping**: eporner cookies only for eporner.com, surrit gets missav referer
+- **FFmpeg Concurrency**: Configurable max (`MAX_FFMPEG`, default 5)
+- **Player UI**: Login form + hls.js player + copyable direct link + download button
+- **Automated Deployment**: GitHub Actions workflow with Cloudflare Quick Tunnel
+
+---
+
+## Routes
+
+All media routes use `?url=<percent-encoded-target>`.
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/` | GET | API index (JSON) |
+| `/health` | GET | Health check |
+| `/api/status` | GET | Auth status |
+| `/player` | GET | Player UI (unauthenticated) |
+| `/login` | POST | Authenticate via `Authorization: Bearer <token>` |
+| `/logout` | GET | Clear session |
+| `/proxy?url=...` | GET | Stream through cloudscraper (passthrough) |
+| `/direct?url=...` | GET | ffmpeg remux to fragmented MP4 |
+| `/download?url=...` | GET | Same as direct, triggers browser download |
 
 ---
 
@@ -17,35 +40,68 @@ A lightweight HTTP streaming reverse proxy built with Flask and `requests`, desi
 
 ### Prerequisites
 - Python 3.10+
+- ffmpeg (for `/direct` and `/download` routes)
 - `pip`
 
 ### 1. Install Dependencies
 ```bash
-pip install flask requests
+pip install -r requirements.txt
+playwright install --with-deps chromium  # for cookie extraction
 ```
 
-### 2. Run the Proxy Server
+### 2. Set Environment Variables
+```bash
+export STREAMZY_TOKEN="your-secret-token"   # auth (optional, bypasses auth if unset)
+export EP_USERNAME="SpideyDih_69"            # for cookie extraction
+export EP_PASSWORD="Spidy@123"               # for cookie extraction
+export SURRIT_REFERER="https://missav.ws/"   # default
+export MAX_FFMPEG=5                          # default
+```
+
+### 3. Extract Cookies (optional, for eporner streams)
+```bash
+python extract_cookies.py
+```
+
+### 4. Run the Server
 ```bash
 python eproxy.py
+# or with gunicorn
+gunicorn -w 2 --threads 16 -b 0.0.0.0:8989 --timeout 0 eproxy:app
 ```
-The server will start listening on `http://0.0.0.0:8989`.
 
-### 3. Stream through the Proxy
-Pass the target media URL directly as the route path:
+### 5. Stream through the Proxy
 ```bash
-curl -i "http://localhost:8989/https://example.com/video.mp4"
+# Proxy stream (passthrough)
+curl "http://localhost:8989/proxy?url=https%3A%2F%2Fwww.eporner.com%2Fdload%2F...%2Fvideo.mp4"
+
+# Direct remux to MP4
+curl "http://localhost:8989/direct?url=https%3A%2F%2Fsurrit.com%2F...%2Fvideo.m3u8"
+
+# With token
+curl "http://localhost:8989/proxy?_token=your-secret-token&url=https%3A%2F%2F..."
 ```
 
 ---
 
 ## Running with Cloudflare Quick Tunnel (GitHub Actions)
 
-The repository includes a GitHub Actions workflow (`.github/workflows/eproxy.yml`) to deploy the proxy on GitHub runners and expose it over the internet using Cloudflare Quick Tunnels.
+The workflow (`.github/workflows/eproxy.yml`) deploys the proxy on a GitHub runner with a Cloudflare Quick Tunnel.
 
+### Required Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `STREAMZY_TOKEN` | Auth token for the proxy |
+| `EP_USERNAME` | eporner username for cookie extraction |
+| `EP_PASSWORD` | eporner password for cookie extraction |
+
+### Steps
 1. Go to the **Actions** tab in GitHub.
 2. Select **EProxy + Cloudflare Quick Tunnel**.
 3. Click **Run workflow**.
-4. Once started, check the **Summary** tab to copy your live `https://*.trycloudflare.com` tunnel URL.
+4. Check the **Summary** tab for the live `https://*.trycloudflare.com` URL.
+5. Open `/player` in a browser to use the web UI.
 
 ---
 
