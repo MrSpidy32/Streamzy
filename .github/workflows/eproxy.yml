@@ -24,6 +24,9 @@ jobs:
 
       - name: Locate and start EProxy
         shell: bash
+        env:
+          EP_USERNAME: ${{ secrets.EP_USERNAME }}
+          EP_PASSWORD: ${{ secrets.EP_PASSWORD }}
         run: |
           set -e
 
