@@ -1,4 +1,4 @@
-name: EProxy + Cloudflare Quick Tunnel
+name: EProxy + Cloudflare Tunnel
 
 on:
   workflow_dispatch:
@@ -131,51 +131,77 @@ jobs:
           echo "Cloudflared version:"
           cloudflared --version
 
-      - name: Start Cloudflare Quick Tunnel
+      - name: Start Cloudflare Tunnel
         shell: bash
+        env:
+          CF_CERT_TOKEN: ${{ secrets.CF_CERT_TOKEN }}
+          CF_TUNNEL_NAME: ${{ secrets.CF_TUNNEL_NAME }}
+          CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
         run: |
           set -e
 
-          nohup cloudflared tunnel \
-            --url http://127.0.0.1:8989 \
-            --no-autoupdate \
-            > cloudflared.log 2>&1 &
+          if [ -n "$CF_CERT_TOKEN" ] && [ -n "$CF_TUNNEL_NAME" ] && [ -n "$CF_DOMAIN" ]; then
+            echo "=== Named Tunnel Mode ==="
+            echo "Tunnel: $CF_TUNNEL_NAME"
+            echo "Domain: $CF_DOMAIN"
+
+            mkdir -p ~/.cloudflared
+            echo "$CF_CERT_TOKEN" | base64 -d > ~/.cloudflared/cert.pem
+
+            nohup cloudflared tunnel \
+              --origindisabled \
+              run \
+              --url http://127.0.0.1:8989 \
+              "$CF_TUNNEL_NAME" \
+              > cloudflared.log 2>&1 &
+
+            TUNNEL_URL="https://$CF_DOMAIN"
+          else
+            echo "=== Quick Tunnel Mode (no named tunnel secrets) ==="
+
+            nohup cloudflared tunnel \
+              --url http://127.0.0.1:8989 \
+              --no-autoupdate \
+              > cloudflared.log 2>&1 &
+
+            echo "Waiting for tunnel URL..."
+
+            TUNNEL_URL=""
+
+            for i in {1..60}; do
+              TUNNEL_URL=$(grep -oE \
+                'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+                cloudflared.log \
+                | head -n 1 || true)
+
+              if [ -n "$TUNNEL_URL" ]; then
+                break
+              fi
+
+              sleep 2
+            done
+
+            if [ -z "$TUNNEL_URL" ]; then
+              echo "Could not obtain tunnel URL."
+              cat cloudflared.log
+              exit 1
+            fi
+          fi
 
           CLOUDFLARED_PID=$!
           echo "$CLOUDFLARED_PID" > cloudflared.pid
 
-          echo "Waiting for tunnel URL..."
+          sleep 3
 
-          TUNNEL_URL=""
-
-          for i in {1..60}; do
-            TUNNEL_URL=$(grep -oE \
-              'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
-              cloudflared.log \
-              | head -n 1 || true)
-
-            if [ -n "$TUNNEL_URL" ]; then
-              break
-            fi
-
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo "Cloudflared stopped!"
-              cat cloudflared.log
-              exit 1
-            fi
-
-            sleep 2
-          done
-
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "Could not obtain Cloudflare tunnel URL."
+          if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            echo "Cloudflared stopped!"
             cat cloudflared.log
             exit 1
           fi
 
           echo ""
           echo "=============================================="
-          echo "       CLOUDFLARE QUICK TUNNEL"
+          echo "       CLOUDFLARE TUNNEL"
           echo "=============================================="
           echo ""
           echo "$TUNNEL_URL"
@@ -187,7 +213,7 @@ jobs:
           {
             echo "# EProxy"
             echo ""
-            echo "## Cloudflare Quick Tunnel"
+            echo "## Cloudflare Tunnel"
             echo ""
             echo "\`$TUNNEL_URL\`"
             echo ""
