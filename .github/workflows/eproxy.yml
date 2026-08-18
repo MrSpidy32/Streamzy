@@ -28,11 +28,21 @@ jobs:
       - name: Verify ffmpeg
         run: ffmpeg -version | head -1
 
+      - name: Cache pip and Playwright
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pip-playwright-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-playwright-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install --with-deps chromium
+          playwright install --with-deps chromium 2>&1 | tail -5
 
       - name: Extract cookies with Playwright
         shell: bash
