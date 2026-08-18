@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from flask import Flask, request, Response, stream_with_context, jsonify
 import requests
@@ -7,14 +8,23 @@ app = Flask(__name__)
 
 SESSION = requests.Session()
 
-DEFAULT_COOKIE = os.environ.get(
-    "EPORNER_COOKIE",
-    (
-        "PHPSESSID=f8ce7430331ba55392325ba9db32506c; "
-        "EPRNS=9beaf0cfc7edb2b264ccad258a7c2dfc; "
-        "ageverif_accepted=T"
-    )
-)
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def load_cookie_file(path: Path):
+    """Load a cookie string from a file, tolerating newlines. Returns None if missing/empty."""
+    try:
+        content = path.read_text().strip()
+    except OSError:
+        return None
+    if not content:
+        return None
+    pairs = [part.strip() for part in content.replace("\r", ";").replace("\n", ";").split(";")]
+    pairs = [p for p in pairs if p]
+    return "; ".join(pairs)
+
+
+DEFAULT_COOKIE = os.environ.get("EPORNER_COOKIE") or load_cookie_file(BASE_DIR / "cookies.txt")
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -41,7 +51,8 @@ def index():
         },
         "cookie_options": {
             "query_parameter": "?_cookie=<your_cookie_string>",
-            "header": "X-Proxy-Cookie: <your_cookie_string> or Cookie: <your_cookie_string>"
+            "header": "X-Proxy-Cookie: <your_cookie_string> or Cookie: <your_cookie_string>",
+            "file": "cookies.txt is loaded automatically (generate with extract_cookies.py)"
         }
     })
 
@@ -95,7 +106,8 @@ def proxy(url):
     referer_header = request.headers.get("X-Proxy-Referer") or default_referer
 
     headers = DEFAULT_HEADERS.copy()
-    headers["Cookie"] = cookie_header
+    if cookie_header:
+        headers["Cookie"] = cookie_header
     headers["Referer"] = referer_header
 
     # Forward Range requests for seeking in video players
