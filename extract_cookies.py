@@ -15,8 +15,8 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 BASE_URL = os.environ.get("EP_BASE_URL", "https://www.eporner.com")
-USERNAME = os.environ.get("EP_USERNAME", "SpideyDih_69")
-PASSWORD = os.environ.get("EP_PASSWORD", "Spidy@123")
+USERNAME = os.environ.get("EP_USERNAME", "")
+PASSWORD = os.environ.get("EP_PASSWORD", "")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 COOKIES_FILE = SCRIPT_DIR / "cookies.txt"
@@ -42,11 +42,8 @@ AGE_BUTTON_TEXTS = [
     "Agree",
 ]
 
-LOGIN_URL_HINTS = ["/login", "/auth/login", "/signin"]
-
 
 def accept_age_verification(page) -> bool:
-    """Click the age gate if one appears. Returns True if clicked."""
     for text in AGE_BUTTON_TEXTS:
         button = page.get_by_role("button", name=text).first
         if button.count():
@@ -61,7 +58,6 @@ def accept_age_verification(page) -> bool:
 
 
 def login(page) -> bool:
-    """Log in with the dummy account via the member login modal. Returns True on success."""
     if not USERNAME or not PASSWORD:
         print("[!] EP_USERNAME / EP_PASSWORD not set - skipping login")
         return False
@@ -90,7 +86,7 @@ def login(page) -> bool:
 
     try:
         page.wait_for_url("**/profile/**", timeout=15000)
-        print(f"[+] Logged in as {USERNAME} -> {page.url}")
+        print(f"[+] Logged in as {USERNAME}")
         return True
     except Exception:
         pass
@@ -104,11 +100,15 @@ def login(page) -> bool:
     if success:
         print(f"[+] Logged in as {USERNAME}")
     else:
-        print("[!] Login result not confirmed - continuing with session cookies")
+        print("[!] Login result not confirmed - continuing without login")
     return success
 
 
 def main() -> int:
+    if not USERNAME or not PASSWORD:
+        print("[=] No credentials provided (EP_USERNAME/EP_PASSWORD not set)")
+        print("[=] Will extract session cookies without login")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context(user_agent=USER_AGENT)
@@ -121,19 +121,16 @@ def main() -> int:
         if not accepted:
             domain = urlparse(BASE_URL).netloc
             try:
-                context.add_cookies([
-                    {
-                        "name": "ageverif_accepted",
-                        "value": "T",
-                        "domain": domain,
-                        "path": "/",
-                    }
-                ])
+                context.add_cookies([{
+                    "name": "ageverif_accepted",
+                    "value": "T",
+                    "domain": domain,
+                    "path": "/",
+                }])
                 print(f"[+] Forced ageverif_accepted cookie on {domain}")
             except Exception as exc:
                 print(f"[!] Could not force age cookie: {exc}")
 
-        # Reload to settle fresh session cookies
         page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
 
         cookies = context.cookies()
@@ -146,9 +143,8 @@ def main() -> int:
 
         print(f"[+] Saved {len(cookies)} cookies to {COOKIES_FILE}")
         for c in cookies:
-            value = c["value"]
-            shown = value if len(value) <= 40 else value[:40] + "..."
-            print(f"    {c['name']} = {shown}")
+            v = c["value"]
+            print(f"    {c['name']} = {v[:4]}{'***' if len(v) > 4 else ''}")
 
         browser.close()
     return 0

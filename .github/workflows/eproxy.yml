@@ -15,12 +15,20 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
+
+      - name: Verify ffmpeg
+        run: |
+          if ! command -v ffmpeg &>/dev/null; then
+            echo "❌ ffmpeg not found!"
+            exit 1
+          fi
+          ffmpeg -version | head -1
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flask requests playwright
+          pip install -r requirements.txt
           playwright install --with-deps chromium
 
       - name: Extract cookies with Playwright
@@ -31,62 +39,45 @@ jobs:
         run: |
           set -e
 
-          echo "Searching for extract_cookies.py..."
-
           EXTRACTOR=$(find "$GITHUB_WORKSPACE" \
-            -type f \
-            -iname "extract_cookies.py" \
-            -print -quit)
+            -type f -iname "extract_cookies.py" -print -quit)
 
           if [ -z "$EXTRACTOR" ]; then
             echo "❌ extract_cookies.py not found!"
             exit 1
           fi
 
-          echo "✅ Found:"
-          echo "$EXTRACTOR"
-
           cd "$(dirname "$EXTRACTOR")"
-
-          echo "Running cookie extraction..."
-
           python "$(basename "$EXTRACTOR")"
+          echo "[ok] cookies.txt ready"
 
-          echo ""
-          echo "===== cookies.txt ====="
-          cat cookies.txt || true
-
-      - name: Locate and start EProxy
+      - name: Start EProxy with Gunicorn
         shell: bash
         env:
+          STREAMZY_TOKEN: ${{ secrets.STREAMZY_TOKEN }}
           EP_USERNAME: ${{ secrets.EP_USERNAME }}
           EP_PASSWORD: ${{ secrets.EP_PASSWORD }}
         run: |
           set -e
 
-          echo "Searching for eproxy.py..."
-
           EPROXY=$(find "$GITHUB_WORKSPACE" \
-            -type f \
-            -iname "eproxy.py" \
-            -print -quit)
+            -type f -iname "eproxy.py" -print -quit)
 
           if [ -z "$EPROXY" ]; then
             echo "❌ eproxy.py not found!"
-            echo ""
-            echo "Repository files:"
-            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f | sort
             exit 1
           fi
 
-          echo "✅ Found:"
-          echo "$EPROXY"
-
           cd "$(dirname "$EPROXY")"
 
-          echo "Starting EProxy..."
+          echo "Starting EProxy (gunicorn)..."
 
-          nohup python "$(basename "$EPROXY")" \
+          nohup gunicorn \
+            -w 2 --threads 16 \
+            -b 0.0.0.0:8989 \
+            --timeout 0 \
+            --access-logfile - \
+            eproxy:app \
             > "$GITHUB_WORKSPACE/eproxy.log" 2>&1 &
 
           EPROXY_PID=$!
@@ -98,16 +89,11 @@ jobs:
 
           if ! kill -0 "$EPROXY_PID" 2>/dev/null; then
             echo "❌ EProxy stopped!"
-            echo ""
             cat "$GITHUB_WORKSPACE/eproxy.log"
             exit 1
           fi
 
           echo "✅ EProxy is running."
-
-          echo ""
-          echo "===== EProxy log ====="
-          cat "$GITHUB_WORKSPACE/eproxy.log" || true
 
       - name: Check proxy port
         shell: bash
@@ -119,16 +105,11 @@ jobs:
               echo "✅ Port 8989 is open."
               exit 0
             fi
-
             sleep 1
           done
 
           echo "❌ Port 8989 is not open."
-
-          echo ""
-          echo "===== EProxy log ====="
           cat eproxy.log || true
-
           exit 1
 
       - name: Install Cloudflared
@@ -136,17 +117,12 @@ jobs:
         run: |
           set -e
 
-          echo "Downloading cloudflared..."
-
           curl -L \
-            --fail \
-            --silent \
-            --show-error \
+            --fail --silent --show-error \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
             -o cloudflared
 
           chmod +x cloudflared
-
           sudo mv cloudflared /usr/local/bin/cloudflared
 
           echo "Cloudflared version:"
@@ -157,18 +133,13 @@ jobs:
         run: |
           set -e
 
-          echo "Starting Cloudflare Quick Tunnel..."
-
           nohup cloudflared tunnel \
             --url http://127.0.0.1:8989 \
             --no-autoupdate \
             > cloudflared.log 2>&1 &
 
           CLOUDFLARED_PID=$!
-
           echo "$CLOUDFLARED_PID" > cloudflared.pid
-
-          echo "Cloudflared PID: $CLOUDFLARED_PID"
 
           echo "Waiting for tunnel URL..."
 
@@ -186,11 +157,7 @@ jobs:
 
             if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
               echo "❌ Cloudflared stopped!"
-
-              echo ""
-              echo "===== Cloudflared log ====="
               cat cloudflared.log
-
               exit 1
             fi
 
@@ -199,11 +166,7 @@ jobs:
 
           if [ -z "$TUNNEL_URL" ]; then
             echo "❌ Could not obtain Cloudflare tunnel URL."
-
-            echo ""
-            echo "===== Cloudflared log ====="
             cat cloudflared.log
-
             exit 1
           fi
 
@@ -212,12 +175,9 @@ jobs:
           echo "       CLOUDFLARE QUICK TUNNEL"
           echo "=============================================="
           echo ""
-          echo "🌐 Proxy URL:"
-          echo ""
-          echo "$TUNNEL_URL"
+          echo "🌐 $TUNNEL_URL"
           echo ""
           echo "=============================================="
-          echo ""
 
           echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
 
@@ -230,19 +190,18 @@ jobs:
             echo ""
             echo "### Proxy endpoint"
             echo ""
-            echo "$TUNNEL_URL/<target-url>"
+            echo "$TUNNEL_URL/proxy?url=<encoded-url>"
+            echo ""
+            echo "### Player"
+            echo ""
+            echo "$TUNNEL_URL/player"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify processes
         shell: bash
         run: |
-          echo "===== Process status ====="
-
           EPROXY_PID=$(cat eproxy.pid)
           CLOUDFLARED_PID=$(cat cloudflared.pid)
-
-          echo "EProxy PID: $EPROXY_PID"
-          echo "Cloudflared PID: $CLOUDFLARED_PID"
 
           if kill -0 "$EPROXY_PID" 2>/dev/null; then
             echo "✅ EProxy running"
@@ -269,28 +228,20 @@ jobs:
           echo "=============================================="
           echo ""
           echo "🌐 $TUNNEL_URL"
-          echo ""
-          echo "EProxy PID: $(cat eproxy.pid)"
-          echo "Cloudflared PID: $(cat cloudflared.pid)"
-          echo ""
-          echo "GitHub Actions runner will keep this alive."
-          echo ""
+          echo "=============================================="
 
           while true; do
-
-            EPROXY_PID=$(cat eproxy.pid)
-            CLOUDFLARED_PID=$(cat cloudflared.pid)
+            EPROXY_PID=$(cat eproxy.pid 2>/dev/null)
+            CLOUDFLARED_PID=$(cat cloudflared.pid 2>/dev/null)
 
             if ! kill -0 "$EPROXY_PID" 2>/dev/null; then
               echo "❌ EProxy stopped!"
-              echo ""
               cat eproxy.log || true
               exit 1
             fi
 
             if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
               echo "❌ Cloudflared stopped!"
-              echo ""
               cat cloudflared.log || true
               exit 1
             fi
