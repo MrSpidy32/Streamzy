@@ -4,6 +4,19 @@ A streaming reverse proxy for eporner.com (mp4) and surrit.com/missav (HLS m3u8)
 
 ---
 
+## Quick Start
+
+**[Open Streamzy Player](https://mrspidy32.github.io/Streamzy/)**
+
+1. Run the workflow from the [Actions tab](https://github.com/MrSpidy32/Streamzy/actions/workflows/eproxy.yml) to start a tunnel
+2. Open the player page — it shows the live tunnel URL automatically
+3. Paste an m3u8 or mp4 URL and click **Play**
+4. Use **Direct Link** to copy a remuxed MP4 URL, or **Download** to save it
+
+The player connects through the Cloudflare Quick Tunnel to the proxy running on GitHub Actions.
+
+---
+
 ## Features
 
 - **Epornor Proxy**: Stream/MP4 passthrough via cloudscraper sessions
