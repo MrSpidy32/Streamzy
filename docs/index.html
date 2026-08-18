@@ -95,12 +95,9 @@ let hls = null;
 function enc(u) { return encodeURIComponent(u); }
 
 function isM3u8(u) { return /\.m3u8(\?|$)/i.test(u); }
+function isDirect(u) { return /\.mp4(\?|$)/i.test(u) || isM3u8(u); }
 
-function load() {
-  const raw = document.getElementById('url').value.trim();
-  if (!raw) return;
-  const url = raw.startsWith('http') ? raw : 'https://' + raw;
-
+function play(url) {
   if (hls) { hls.destroy(); hls = null; }
   video.removeAttribute('src');
   video.load();
@@ -151,6 +148,27 @@ function load() {
     status.className = 'status ok';
     status.textContent = 'Playing (MP4 proxy)';
     video.play().catch(function(){});
+  }
+}
+
+function load() {
+  const raw = document.getElementById('url').value.trim();
+  if (!raw) return;
+  const url = raw.startsWith('http') ? raw : 'https://' + raw;
+
+  if (isDirect(url)) {
+    play(url);
+  } else {
+    status.className = 'status';
+    status.textContent = 'Extracting video from page...';
+    fetch(TUNNEL + '/extract?url=' + enc(url))
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.error) { status.className = 'status error'; status.textContent = 'Error: ' + d.error; return; }
+        document.getElementById('url').value = d.url;
+        play(d.url);
+      })
+      .catch(function() { status.className = 'status error'; status.textContent = 'Extraction failed'; });
   }
 }
 

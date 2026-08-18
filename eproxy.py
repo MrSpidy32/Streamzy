@@ -43,7 +43,7 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-ALLOWED_HOSTS = {"surrit.com", "eporner.com"}
+ALLOWED_HOSTS = {"surrit.com", "eporner.com", "gvideo.eporner.com"}
 BLOCKED_NETS = [
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("100.64.0.0/10"),
@@ -439,7 +439,20 @@ document.getElementById('player-form').addEventListener('submit', e => {
   let url = document.getElementById('url').value.trim();
   if (!url) return;
   if (!/^https?:\\/\\//i.test(url)) url = 'https://' + url;
-  play(url);
+  const isDirect = /\\.mp4(\\?|$)/i.test(url) || /\\.m3u8(\\?|$)/i.test(url);
+  if (isDirect) {
+    play(url);
+  } else {
+    info.textContent = 'Extracting video from page...';
+    fetch('/extract?url=' + enc(url))
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { info.textContent = 'Error: ' + d.error; return; }
+        document.getElementById('url').value = d.url;
+        play(d.url);
+      })
+      .catch(() => { info.textContent = 'Extraction failed'; });
+  }
 });
 
 function copyLink() {
@@ -466,6 +479,68 @@ def player():
 
 
 # ── Routes: media ─────────────────────────────────────────────────────────────
+
+
+@app.route("/extract")
+def extract():
+    auth_err = _auth()
+    if auth_err:
+        return auth_err
+
+    raw = request.args.get("url")
+    if not raw:
+        return jsonify({"error": "missing url parameter"}), 400
+
+    target = _decode(raw)
+    parsed = urlparse(target)
+    host = (parsed.hostname or "").lower()
+
+    if not any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS):
+        return jsonify({"error": f"host not allowed: {host}"}), 400
+
+    if not target.lower().endswith(".mp4") and not target.lower().endswith(".m3u8"):
+        # It's a page URL — fetch and extract
+        headers = _upstream_headers(target)
+        sess = _make_session()
+        try:
+            r = sess.get(target, headers=headers, allow_redirects=True, timeout=30)
+            if r.status_code != 200:
+                _close(sess, r)
+                return jsonify({"error": f"upstream {r.status_code}"}), 502
+            html = r.text
+            _close(sess, r)
+        except Exception as e:
+            _close(sess, None)
+            return jsonify({"error": str(e)}), 502
+
+        # Try /dload/ paths first (highest quality)
+        dloads = re.findall(r'/dload/([^\s"<>\']+\.mp4)', html, re.I)
+        if dloads:
+            best = sorted(dloads, key=lambda x: int(re.search(r'(\d+)p', x).group(1)) if re.search(r'(\d+)p', x) else 0, reverse=True)[0]
+            mp4 = f"{parsed.scheme}://{parsed.netloc}/dload/{best}"
+            return jsonify({"url": mp4, "source": target})
+
+        # Fallback to <source> or regex
+        mp4 = None
+        m = re.search(r'<source[^>]+src="([^"]+\.mp4[^"]*)"', html, re.I)
+        if m:
+            mp4 = m.group(1)
+        if not mp4:
+            m = re.search(r'(https?://[^\s"\'<>]+\.mp4(?:\?[^\s"\'<>]*)?)', html, re.I)
+            if m:
+                mp4 = m.group(1)
+        if not mp4:
+            return jsonify({"error": "no mp4 found on page"}), 404
+
+        if mp4.startswith("//"):
+            mp4 = "https:" + mp4
+        elif mp4.startswith("/"):
+            mp4 = f"{parsed.scheme}://{parsed.netloc}{mp4}"
+
+        return jsonify({"url": mp4, "source": target})
+
+    # Already a direct URL — return as-is
+    return jsonify({"url": target, "source": target})
 
 
 @app.route("/proxy")
