@@ -10,7 +10,7 @@ A streaming reverse proxy for eporner.com (mp4) and surrit.com/missav (HLS m3u8)
 
 1. Run the workflow from the [Actions tab](https://github.com/MrSpidy32/Streamzy/actions/workflows/eproxy.yml) to start a tunnel
 2. Open the player page — it shows the live tunnel URL automatically
-3. Paste an m3u8 or mp4 URL and click **Play**
+3. Paste a full post page URL or direct mp4/m3u8 link and click **Play**
 4. Use **Direct Link** to copy a remuxed MP4 URL, or **Download** to save it
 
 The player connects through the Cloudflare Quick Tunnel to the proxy running on GitHub Actions.
@@ -46,6 +46,7 @@ All media routes use `?url=<percent-encoded-target>`.
 | `/proxy?url=...` | GET | Stream through cloudscraper (passthrough) |
 | `/direct?url=...` | GET | ffmpeg remux to fragmented MP4 |
 | `/download?url=...` | GET | Same as direct, triggers browser download |
+| `/extract?url=...` | GET | Extract mp4 URL from a post page (JSON) |
 
 ---
 
