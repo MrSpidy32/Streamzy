@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streamzy</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px; padding: 24px;
+    background: #0d1117; color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .container { width: 100%; max-width: 720px; display: flex; flex-direction: column; gap: 16px; }
+  h1 { font-size: 1.4rem; font-weight: 600; text-align: center; }
+  .tunnel {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px;
+    text-align: center; word-break: break-all;
+  }
+  .tunnel a { color: #58a6ff; text-decoration: none; font-size: 0.95rem; }
+  .tunnel a:hover { text-decoration: underline; }
+  .tunnel .label { font-size: 0.75rem; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  input[type="text"] {
+    width: 100%; padding: 12px 14px; border-radius: 8px; border: 1px solid #30363d;
+    background: #161b22; color: #e6edf3; font-size: 0.95rem; outline: none;
+  }
+  input[type="text"]:focus { border-color: #58a6ff; }
+  input[type="text"]::placeholder { color: #484f58; }
+  .btn {
+    padding: 12px 20px; border-radius: 8px; border: none; cursor: pointer;
+    font-size: 0.95rem; font-weight: 500; transition: background 0.15s;
+  }
+  .btn-primary { background: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+  .btn-secondary:hover { background: #30363d; }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; }
+  .row .btn { flex-shrink: 0; }
+  .player-box {
+    background: #000; border-radius: 8px; overflow: hidden;
+    aspect-ratio: 16/9; display: none; position: relative;
+  }
+  video { width: 100%; height: 100%; display: block; }
+  .status { font-size: 0.8rem; color: #8b949e; text-align: center; min-height: 1.2em; }
+  .status.error { color: #f85149; }
+  .status.ok { color: #3fb950; }
+  .links { display: none; gap: 8px; }
+  .links a {
+    flex: 1; text-align: center; padding: 10px; border-radius: 8px;
+    background: #161b22; border: 1px solid #30363d; color: #58a6ff;
+    text-decoration: none; font-size: 0.85rem; word-break: break-all;
+  }
+  .links a:hover { border-color: #58a6ff; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Streamzy</h1>
+
+  <div class="tunnel">
+    <div class="label">Live Tunnel</div>
+    <a id="tunnel-link" href="__TUNNEL_URL__" target="_blank">__TUNNEL_URL__</a>
+  </div>
+
+  <div class="row">
+    <input type="text" id="url" placeholder="Paste m3u8 or mp4 URL...">
+    <button class="btn btn-primary" onclick="load()">Play</button>
+  </div>
+
+  <div class="player-box" id="player-box">
+    <video id="video" controls></video>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="links" id="links">
+    <a id="link-direct" href="#" target="_blank">Direct Link</a>
+    <a id="link-download" href="#" target="_blank">Download</a>
+  </div>
+</div>
+
+<script>
+const TUNNEL = document.getElementById('tunnel-link').href;
+const video = document.getElementById('video');
+const status = document.getElementById('status');
+const playerBox = document.getElementById('player-box');
+const links = document.getElementById('links');
+let hls = null;
+
+function enc(u) { return encodeURIComponent(u); }
+
+function isM3u8(u) { return /\.m3u8(\?|$)/i.test(u); }
+
+function load() {
+  const raw = document.getElementById('url').value.trim();
+  if (!raw) return;
+  const url = raw.startsWith('http') ? raw : 'https://' + raw;
+
+  if (hls) { hls.destroy(); hls = null; }
+  video.removeAttribute('src');
+  video.load();
+  playerBox.style.display = 'none';
+  links.style.display = 'none';
+  status.className = 'status';
+  status.textContent = 'Loading...';
+
+  if (isM3u8(url)) {
+    const proxyUrl = TUNNEL + '/proxy?url=' + enc(url);
+    if (Hls.isSupported()) {
+      hls = new Hls();
+      hls.loadSource(proxyUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, function() {
+        playerBox.style.display = 'block';
+        links.style.display = 'flex';
+        document.getElementById('link-direct').href = TUNNEL + '/direct?url=' + enc(url);
+        document.getElementById('link-download').href = TUNNEL + '/download?url=' + enc(url);
+        status.className = 'status ok';
+        status.textContent = 'Playing (HLS proxy)';
+        video.play().catch(function(){});
+      });
+      hls.on(Hls.Events.ERROR, function(e, data) {
+        if (data.fatal) {
+          status.className = 'status error';
+          status.textContent = 'HLS error: ' + data.type;
+        }
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = proxyUrl;
+      playerBox.style.display = 'block';
+      links.style.display = 'flex';
+      document.getElementById('link-direct').href = TUNNEL + '/direct?url=' + enc(url);
+      document.getElementById('link-download').href = TUNNEL + '/download?url=' + enc(url);
+      status.className = 'status ok';
+      status.textContent = 'Playing (native HLS)';
+    } else {
+      status.className = 'status error';
+      status.textContent = 'HLS not supported in this browser';
+    }
+  } else {
+    video.src = TUNNEL + '/proxy?url=' + enc(url);
+    playerBox.style.display = 'block';
+    links.style.display = 'flex';
+    document.getElementById('link-direct').href = TUNNEL + '/direct?url=' + enc(url);
+    document.getElementById('link-download').href = TUNNEL + '/download?url=' + enc(url);
+    status.className = 'status ok';
+    status.textContent = 'Playing (MP4 proxy)';
+    video.play().catch(function(){});
+  }
+}
+
+document.getElementById('url').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') load();
+});
+</script>
+</body>
+</html>
