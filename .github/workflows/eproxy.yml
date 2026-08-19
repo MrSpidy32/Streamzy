@@ -13,10 +13,6 @@ on:
         required: false
         default: true
         type: boolean
-  schedule:
-    # Optional scheduled run: Every 6 hours (0 */6 * * *)
-    # Uncomment or adjust as desired:
-    # - cron: '0 */6 * * *'
 
 permissions:
   contents: read
