@@ -23,6 +23,7 @@ import ipaddress
 import os
 import re
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -62,6 +63,10 @@ SURRIT_REFERER = os.environ.get("SURRIT_REFERER", "https://missav.ws/")
 PROXY_BASE = os.environ.get("PROXY_INTERNAL_BASE", "http://127.0.0.1:8989")
 FFMPEG = shutil.which("ffmpeg")
 MAX_FFMPEG = int(os.environ.get("MAX_FFMPEG", "5"))
+MAX_PLAYLIST_BYTES = int(os.environ.get("MAX_PLAYLIST_BYTES", str(1024 * 1024)))
+MAX_FFMPEG_BYTES = int(os.environ.get("MAX_FFMPEG_BYTES", str(2 * 1024 * 1024 * 1024)))
+FFMPEG_TIMEOUT = int(os.environ.get("FFMPEG_TIMEOUT", "1800"))
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://mrspidy32.github.io")
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -75,7 +80,7 @@ _RESP_EXCLUDE = {"content-encoding", "transfer-encoding", "connection"}
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
-app.secret_key = STREAMZY_TOKEN.encode() if STREAMZY_TOKEN else secrets.token_bytes(32)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", STREAMZY_TOKEN or secrets.token_hex(32))
 _ffmpeg_sem = threading.Semaphore(MAX_FFMPEG)
 
 # ── Cookie loading ────────────────────────────────────────────────────────────
@@ -148,6 +153,33 @@ def _validate_target(url):
     return url, None
 
 
+def _get_with_validated_redirects(sess, target, stream=False):
+    """Fetch only HTTPS allowlisted URLs, validating every redirect target."""
+    current = target
+    for _ in range(6):
+        current, err = _validate_target(current)
+        if err:
+            return None, None, err
+        try:
+            response = sess.get(
+                current,
+                headers=_upstream_headers(current),
+                stream=stream,
+                allow_redirects=False,
+                timeout=30,
+            )
+        except Exception as exc:
+            return None, None, (jsonify({"error": str(exc)}), 502)
+        if not response.is_redirect:
+            return response, current, None
+        location = response.headers.get("Location")
+        response.close()
+        if not location:
+            return None, None, (jsonify({"error": "redirect without location"}), 502)
+        current = urljoin(current, location)
+    return None, None, (jsonify({"error": "too many redirects"}), 502)
+
+
 def _upstream_headers(target_url):
     p = urlparse(target_url)
     host = (p.hostname or "").lower()
@@ -189,7 +221,9 @@ def _cleanup_dir(path):
 
 @app.after_request
 def _cors(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
+    if request.headers.get("Origin") == CORS_ORIGIN:
+        resp.headers["Access-Control-Allow-Origin"] = CORS_ORIGIN
+        resp.headers["Vary"] = "Origin"
     resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     resp.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS, POST"
     return resp

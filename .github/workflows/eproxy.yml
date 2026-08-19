@@ -2,6 +2,21 @@ name: EProxy + Cloudflare Tunnel
 
 on:
   workflow_dispatch:
+    inputs:
+      keepalive_hours:
+        description: "Hours to keep proxy running (max 6)"
+        required: false
+        default: "6"
+        type: string
+      send_telegram:
+        description: "Send Tunnel URL notification to Telegram"
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    # Optional scheduled run: Every 6 hours (0 */6 * * *)
+    # Uncomment or adjust as desired:
+    # - cron: '0 */6 * * *'
 
 permissions:
   contents: read
@@ -236,14 +251,49 @@ jobs:
             echo "$TUNNEL_URL/player"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Send Telegram Notification
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.send_telegram != 'false' }}
+        shell: bash
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN || secrets.BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID || secrets.CHAT_ID }}
+        run: |
+          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+            echo "Telegram credentials not found in secrets (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID). Skipping Telegram notification."
+            exit 0
+          fi
+
+          echo "Sending Telegram notification..."
+          
+          REPO="${GITHUB_REPOSITORY}"
+          RUN_ID="${GITHUB_RUN_ID}"
+          
+          TEXT="🚀 <b>Streamzy Proxy Live!</b>%0A%0A"
+          TEXT="${TEXT}🌐 <b>Tunnel:</b> <code>${TUNNEL_URL}</code>%0A"
+          TEXT="${TEXT}🎬 <b>Player:</b> <code>${TUNNEL_URL}/player</code>%0A"
+          TEXT="${TEXT}🔗 <b>Proxy API:</b> <code>${TUNNEL_URL}/proxy?url=...</code>%0A%0A"
+          TEXT="${TEXT}📦 <b>Repository:</b> ${REPO}%0A"
+          TEXT="${TEXT}⚡ <b>Run ID:</b> #${RUN_ID}"
+
+          RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TG_CHAT_ID}" \
+            -d "text=${TEXT}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true")
+
+          echo "Telegram Response: $RESPONSE"
+
       - name: Deploy to GitHub Pages
         id: deploy
+        continue-on-error: true
         shell: bash
         run: |
-          set -e
+          if [ ! -d "docs" ]; then
+            echo "docs folder not found, skipping pages build."
+            exit 0
+          fi
 
           mkdir -p _site
-
           sed "s|__TUNNEL_URL__|${TUNNEL_URL}|g" \
             docs/index.html > _site/index.html
 
@@ -251,11 +301,13 @@ jobs:
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
+        continue-on-error: true
         with:
           path: _site
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
+        continue-on-error: true
 
       - name: Verify processes
         shell: bash
@@ -281,18 +333,22 @@ jobs:
 
       - name: Keep proxy and tunnel alive
         shell: bash
+        env:
+          KEEPALIVE_HOURS: ${{ github.event.inputs.keepalive_hours || '6' }}
         run: |
           echo ""
           echo "=============================================="
           echo "             PROXY IS LIVE"
           echo "=============================================="
           echo ""
-          echo "$TUNNEL_URL"
-          echo ""
-          echo "GitHub Pages: https://$(echo $GITHUB_REPOSITORY | tr '[:upper:]' '[:lower:]').github.io/$(echo $GITHUB_REPOSITORY | cut -d/ -f2)/"
+          echo "Tunnel: $TUNNEL_URL"
+          echo "Keepalive duration: ${KEEPALIVE_HOURS} hour(s)"
           echo "=============================================="
 
-          while true; do
+          MAX_SECONDS=$(( ${KEEPALIVE_HOURS:-6} * 3600 ))
+          ELAPSED=0
+
+          while [ $ELAPSED -lt $MAX_SECONDS ]; do
             EPROXY_PID=$(cat eproxy.pid 2>/dev/null)
             CLOUDFLARED_PID=$(cat cloudflared.pid 2>/dev/null)
 
@@ -309,7 +365,10 @@ jobs:
             fi
 
             sleep 30
+            ELAPSED=$((ELAPSED + 30))
           done
+
+          echo "Reached keep-alive limit ($MAX_SECONDS seconds). Exiting gracefully."
 
       - name: Show logs
         if: always()
