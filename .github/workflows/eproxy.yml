@@ -133,28 +133,44 @@ jobs:
         run: |
           set -e
 
-          if [ -n "$CF_CERT_TOKEN" ] && [ -n "$CF_TUNNEL_NAME" ] && [ -n "$CF_DOMAIN" ]; then
-            echo "=== Named Tunnel Mode ==="
-            mkdir -p ~/.cloudflared
-            echo "$CF_CERT_TOKEN" | base64 -d > ~/.cloudflared/cert.pem
+          TUNNEL_STARTED=false
 
-            nohup cloudflared tunnel run \
+          if [ -n "$CF_CERT_TOKEN" ] && [ -n "$CF_TUNNEL_NAME" ] && [ -n "$CF_DOMAIN" ]; then
+            echo "Attempting Named Tunnel Mode..."
+            mkdir -p ~/.cloudflared
+            echo "$CF_CERT_TOKEN" | base64 -d > ~/.cloudflared/cert.pem 2>/dev/null || true
+
+            nohup cloudflared tunnel --origincert ~/.cloudflared/cert.pem run \
               --url http://127.0.0.1:8989 \
               "$CF_TUNNEL_NAME" \
               > "$GITHUB_WORKSPACE/cloudflared.log" 2>&1 &
 
-            TUNNEL_URL="https://$CF_DOMAIN"
-          else
+            CLOUDFLARED_PID=$!
+            sleep 3
+            if kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              TUNNEL_URL="https://$CF_DOMAIN"
+              TUNNEL_STARTED=true
+              echo "$CLOUDFLARED_PID" > "$GITHUB_WORKSPACE/cloudflared.pid"
+              echo "Named tunnel started at $TUNNEL_URL"
+            else
+              echo "Named tunnel failed. Falling back to Quick Tunnel (trycloudflare)..."
+            fi
+          fi
+
+          if [ "$TUNNEL_STARTED" != "true" ]; then
             echo "=== Quick Tunnel Mode (trycloudflare.com) ==="
             nohup cloudflared tunnel \
               --url http://127.0.0.1:8989 \
               --no-autoupdate \
               > "$GITHUB_WORKSPACE/cloudflared.log" 2>&1 &
 
+            CLOUDFLARED_PID=$!
+            echo "$CLOUDFLARED_PID" > "$GITHUB_WORKSPACE/cloudflared.pid"
+
             echo "Waiting for tunnel URL..."
             TUNNEL_URL=""
 
-            for i in {1..60}; do
+            for i in {1..30}; do
               TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$GITHUB_WORKSPACE/cloudflared.log" | head -n 1 || true)
               if [ -n "$TUNNEL_URL" ]; then
                 break
@@ -169,12 +185,10 @@ jobs:
             fi
           fi
 
-          CLOUDFLARED_PID=$!
-          echo "$CLOUDFLARED_PID" > "$GITHUB_WORKSPACE/cloudflared.pid"
-
-          sleep 3
+          sleep 2
+          CLOUDFLARED_PID=$(cat "$GITHUB_WORKSPACE/cloudflared.pid")
           if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-            echo "Cloudflared failed to start!"
+            echo "Cloudflared failed to stay alive!"
             cat "$GITHUB_WORKSPACE/cloudflared.log"
             exit 1
           fi
