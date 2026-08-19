@@ -138,9 +138,7 @@ jobs:
             mkdir -p ~/.cloudflared
             echo "$CF_CERT_TOKEN" | base64 -d > ~/.cloudflared/cert.pem
 
-            nohup cloudflared tunnel \
-              --origindisabled \
-              run \
+            nohup cloudflared tunnel run \
               --url http://127.0.0.1:8989 \
               "$CF_TUNNEL_NAME" \
               > "$GITHUB_WORKSPACE/cloudflared.log" 2>&1 &
@@ -174,9 +172,16 @@ jobs:
           CLOUDFLARED_PID=$!
           echo "$CLOUDFLARED_PID" > "$GITHUB_WORKSPACE/cloudflared.pid"
 
+          sleep 3
+          if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            echo "Cloudflared failed to start!"
+            cat "$GITHUB_WORKSPACE/cloudflared.log"
+            exit 1
+          fi
+
           echo ""
           echo "=============================================="
-          echo "       CLOUDFLARE TUNNEL"
+          echo "       CLOUDFLARE TUNNEL LIVE"
           echo "=============================================="
           echo "$TUNNEL_URL"
           echo "=============================================="
