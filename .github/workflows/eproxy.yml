@@ -16,16 +16,11 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   proxy:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
       - name: Checkout repository
@@ -35,25 +30,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Verify ffmpeg
-        run: ffmpeg -version | head -1
-
-      - name: Cache pip and Playwright
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/ms-playwright
-          key: ${{ runner.os }}-pip-playwright-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-playwright-
+          cache: "pip"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          playwright install --with-deps chromium 2>&1 | tail -5
+          pip install --no-cache-dir -r requirements.txt
+          playwright install chromium
 
       - name: Extract cookies with Playwright
         shell: bash
@@ -63,8 +45,7 @@ jobs:
         run: |
           set -e
 
-          EXTRACTOR=$(find "$GITHUB_WORKSPACE" \
-            -type f -iname "extract_cookies.py" -print -quit)
+          EXTRACTOR=$(find "$GITHUB_WORKSPACE" -type f -iname "extract_cookies.py" -print -quit)
 
           if [ -z "$EXTRACTOR" ]; then
             echo "extract_cookies.py not found!"
@@ -84,8 +65,7 @@ jobs:
         run: |
           set -e
 
-          EPROXY=$(find "$GITHUB_WORKSPACE" \
-            -type f -iname "eproxy.py" -print -quit)
+          EPROXY=$(find "$GITHUB_WORKSPACE" -type f -iname "eproxy.py" -print -quit)
 
           if [ -z "$EPROXY" ]; then
             echo "eproxy.py not found!"
@@ -93,7 +73,6 @@ jobs:
           fi
 
           cd "$(dirname "$EPROXY")"
-
           echo "Starting EProxy (gunicorn)..."
 
           nohup gunicorn \
@@ -106,13 +85,12 @@ jobs:
 
           EPROXY_PID=$!
           echo "$EPROXY_PID" > "$GITHUB_WORKSPACE/eproxy.pid"
-
           echo "EProxy PID: $EPROXY_PID"
 
           sleep 3
 
           if ! kill -0 "$EPROXY_PID" 2>/dev/null; then
-            echo "EProxy stopped!"
+            echo "EProxy failed to start!"
             cat "$GITHUB_WORKSPACE/eproxy.log"
             exit 1
           fi
@@ -123,7 +101,6 @@ jobs:
         shell: bash
         run: |
           echo "Checking port 8989..."
-
           for i in {1..20}; do
             if (echo > /dev/tcp/127.0.0.1/8989) >/dev/null 2>&1; then
               echo "Port 8989 is open."
@@ -133,24 +110,19 @@ jobs:
           done
 
           echo "Port 8989 is not open."
-          cat eproxy.log || true
+          cat "$GITHUB_WORKSPACE/eproxy.log" || true
           exit 1
 
       - name: Install Cloudflared
         shell: bash
         run: |
           set -e
-
-          curl -L \
-            --fail --silent --show-error \
+          curl -L --fail --silent --show-error \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
             -o cloudflared
-
           chmod +x cloudflared
           sudo mv cloudflared /usr/local/bin/cloudflared
-
-          echo "Cloudflared version:"
-          cloudflared --version
+          echo "Cloudflared version: $(cloudflared --version)"
 
       - name: Start Cloudflare Tunnel
         shell: bash
@@ -163,9 +135,6 @@ jobs:
 
           if [ -n "$CF_CERT_TOKEN" ] && [ -n "$CF_TUNNEL_NAME" ] && [ -n "$CF_DOMAIN" ]; then
             echo "=== Named Tunnel Mode ==="
-            echo "Tunnel: $CF_TUNNEL_NAME"
-            echo "Domain: $CF_DOMAIN"
-
             mkdir -p ~/.cloudflared
             echo "$CF_CERT_TOKEN" | base64 -d > ~/.cloudflared/cert.pem
 
@@ -174,102 +143,81 @@ jobs:
               run \
               --url http://127.0.0.1:8989 \
               "$CF_TUNNEL_NAME" \
-              > cloudflared.log 2>&1 &
+              > "$GITHUB_WORKSPACE/cloudflared.log" 2>&1 &
 
             TUNNEL_URL="https://$CF_DOMAIN"
           else
-            echo "=== Quick Tunnel Mode (no named tunnel secrets) ==="
-
+            echo "=== Quick Tunnel Mode (trycloudflare.com) ==="
             nohup cloudflared tunnel \
               --url http://127.0.0.1:8989 \
               --no-autoupdate \
-              > cloudflared.log 2>&1 &
+              > "$GITHUB_WORKSPACE/cloudflared.log" 2>&1 &
 
             echo "Waiting for tunnel URL..."
-
             TUNNEL_URL=""
 
             for i in {1..60}; do
-              TUNNEL_URL=$(grep -oE \
-                'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
-                cloudflared.log \
-                | head -n 1 || true)
-
+              TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$GITHUB_WORKSPACE/cloudflared.log" | head -n 1 || true)
               if [ -n "$TUNNEL_URL" ]; then
                 break
               fi
-
               sleep 2
             done
 
             if [ -z "$TUNNEL_URL" ]; then
               echo "Could not obtain tunnel URL."
-              cat cloudflared.log
+              cat "$GITHUB_WORKSPACE/cloudflared.log"
               exit 1
             fi
           fi
 
           CLOUDFLARED_PID=$!
-          echo "$CLOUDFLARED_PID" > cloudflared.pid
-
-          sleep 3
-
-          if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-            echo "Cloudflared stopped!"
-            cat cloudflared.log
-            exit 1
-          fi
+          echo "$CLOUDFLARED_PID" > "$GITHUB_WORKSPACE/cloudflared.pid"
 
           echo ""
           echo "=============================================="
           echo "       CLOUDFLARE TUNNEL"
           echo "=============================================="
-          echo ""
           echo "$TUNNEL_URL"
-          echo ""
           echo "=============================================="
 
           echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
 
           {
-            echo "# EProxy"
+            echo "# 🚀 Streamzy Proxy Live"
             echo ""
-            echo "## Cloudflare Tunnel"
-            echo ""
+            echo "### 🌐 Cloudflare Tunnel"
             echo "\`$TUNNEL_URL\`"
             echo ""
-            echo "### Proxy endpoint"
+            echo "### 🎬 Player"
+            echo "[\`$TUNNEL_URL/player\`]($TUNNEL_URL/player)"
             echo ""
-            echo "$TUNNEL_URL/proxy?url=<encoded-url>"
-            echo ""
-            echo "### Player"
-            echo ""
-            echo "$TUNNEL_URL/player"
+            echo "### 🔗 Proxy Endpoint"
+            echo "\`$TUNNEL_URL/proxy?url=<encoded-url>\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Telegram Notification
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.send_telegram != 'false' }}
+        if: ${{ github.event.inputs.send_telegram != 'false' }}
         shell: bash
         env:
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN || secrets.BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID || secrets.CHAT_ID }}
         run: |
           if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
-            echo "Telegram credentials not found in secrets (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID). Skipping Telegram notification."
+            echo "Telegram secrets missing. Skipping notification."
             exit 0
           fi
 
-          echo "Sending Telegram notification..."
-          
+          echo "Sending Telegram alert..."
           REPO="${GITHUB_REPOSITORY}"
           RUN_ID="${GITHUB_RUN_ID}"
-          
-          TEXT="🚀 <b>Streamzy Proxy Live!</b>%0A%0A"
+
+          TEXT="🚀 <b>Streamzy Proxy is Live!</b>%0A%0A"
           TEXT="${TEXT}🌐 <b>Tunnel:</b> <code>${TUNNEL_URL}</code>%0A"
           TEXT="${TEXT}🎬 <b>Player:</b> <code>${TUNNEL_URL}/player</code>%0A"
           TEXT="${TEXT}🔗 <b>Proxy API:</b> <code>${TUNNEL_URL}/proxy?url=...</code>%0A%0A"
-          TEXT="${TEXT}📦 <b>Repository:</b> ${REPO}%0A"
-          TEXT="${TEXT}⚡ <b>Run ID:</b> #${RUN_ID}"
+          TEXT="${TEXT}📦 <b>Repo:</b> ${REPO}%0A"
+          TEXT="${TEXT}⚡ <b>Run:</b> #${RUN_ID}"
 
           RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TG_CHAT_ID}" \
@@ -279,84 +227,31 @@ jobs:
 
           echo "Telegram Response: $RESPONSE"
 
-      - name: Deploy to GitHub Pages
-        id: deploy
-        continue-on-error: true
-        shell: bash
-        run: |
-          if [ ! -d "docs" ]; then
-            echo "docs folder not found, skipping pages build."
-            exit 0
-          fi
-
-          mkdir -p _site
-          sed "s|__TUNNEL_URL__|${TUNNEL_URL}|g" \
-            docs/index.html > _site/index.html
-
-          echo "Built _site/index.html with tunnel URL"
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        continue-on-error: true
-        with:
-          path: _site
-
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
-        continue-on-error: true
-
-      - name: Verify processes
-        shell: bash
-        run: |
-          EPROXY_PID=$(cat eproxy.pid)
-          CLOUDFLARED_PID=$(cat cloudflared.pid)
-
-          if kill -0 "$EPROXY_PID" 2>/dev/null; then
-            echo "EProxy running"
-          else
-            echo "EProxy not running"
-            cat eproxy.log || true
-            exit 1
-          fi
-
-          if kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-            echo "Cloudflared running"
-          else
-            echo "Cloudflared not running"
-            cat cloudflared.log || true
-            exit 1
-          fi
-
       - name: Keep proxy and tunnel alive
         shell: bash
         env:
           KEEPALIVE_HOURS: ${{ github.event.inputs.keepalive_hours || '6' }}
         run: |
-          echo ""
           echo "=============================================="
-          echo "             PROXY IS LIVE"
-          echo "=============================================="
-          echo ""
-          echo "Tunnel: $TUNNEL_URL"
-          echo "Keepalive duration: ${KEEPALIVE_HOURS} hour(s)"
+          echo "PROXY IS RUNNING FOR ${KEEPALIVE_HOURS} HOUR(S)"
           echo "=============================================="
 
           MAX_SECONDS=$(( ${KEEPALIVE_HOURS:-6} * 3600 ))
           ELAPSED=0
 
           while [ $ELAPSED -lt $MAX_SECONDS ]; do
-            EPROXY_PID=$(cat eproxy.pid 2>/dev/null)
-            CLOUDFLARED_PID=$(cat cloudflared.pid 2>/dev/null)
+            EPROXY_PID=$(cat "$GITHUB_WORKSPACE/eproxy.pid" 2>/dev/null)
+            CLOUDFLARED_PID=$(cat "$GITHUB_WORKSPACE/cloudflared.pid" 2>/dev/null)
 
             if ! kill -0 "$EPROXY_PID" 2>/dev/null; then
-              echo "EProxy stopped!"
-              cat eproxy.log || true
+              echo "EProxy stopped unexpectedly!"
+              cat "$GITHUB_WORKSPACE/eproxy.log" || true
               exit 1
             fi
 
             if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo "Cloudflared stopped!"
-              cat cloudflared.log || true
+              echo "Cloudflared stopped unexpectedly!"
+              cat "$GITHUB_WORKSPACE/cloudflared.log" || true
               exit 1
             fi
 
@@ -364,20 +259,13 @@ jobs:
             ELAPSED=$((ELAPSED + 30))
           done
 
-          echo "Reached keep-alive limit ($MAX_SECONDS seconds). Exiting gracefully."
+          echo "Completed duration limit. Exiting."
 
-      - name: Show logs
+      - name: Show logs on failure
         if: always()
         shell: bash
         run: |
-          echo ""
-          echo "=============================================="
-          echo "               EPROXY LOG"
-          echo "=============================================="
-          cat eproxy.log || true
-
-          echo ""
-          echo "=============================================="
-          echo "            CLOUDFLARED LOG"
-          echo "=============================================="
-          cat cloudflared.log || true
+          echo "=== EPROXY LOG ==="
+          cat "$GITHUB_WORKSPACE/eproxy.log" || true
+          echo "=== CLOUDFLARED LOG ==="
+          cat "$GITHUB_WORKSPACE/cloudflared.log" || true
